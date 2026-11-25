@@ -580,3 +580,22 @@ def test_wrap_http_ui_port_forwarding_and_validation(monkeypatch: pytest.MonkeyP
         ],
     )
     assert bad_res.exit_code == 2
+
+
+def test_load_run_live_demo_falls_back_to_packaged_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`mcp-guard demo` still locates run_live_demo when cwd lacks top-level demo/."""
+    real_import_module = cli_module.importlib.import_module
+
+    def fake_import_module(name: str, package: str | None = None) -> Any:
+        if name == "demo.run_demo":
+            raise ModuleNotFoundError("No module named 'demo'")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(cli_module.importlib, "import_module", fake_import_module)
+    monkeypatch.chdir(tmp_path)
+    loaded = cli_module._load_run_live_demo()
+    assert callable(loaded)
+    assert loaded.__module__ == "mcp_guard.demo.run_demo"

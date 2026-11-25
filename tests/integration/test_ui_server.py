@@ -11,6 +11,7 @@ import os
 import re
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -28,7 +29,7 @@ from mcp_guard.ui import (
     start_embedded_ui_server,
     validate_loopback_host,
 )
-from mcp_guard.ui.server import _split_stdio_command
+from mcp_guard.ui.server import _resolve_demo_server_path, _split_stdio_command
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEMO_SERVER = PROJECT_ROOT / "demo" / "vulnerable_server.py"
@@ -580,3 +581,40 @@ async def test_stdio_proxy_with_embedded_ui_preserves_stdout_and_streams_events(
             stdin_reader.close()
 
     assert exit_code == 0
+
+
+async def test_embedded_ui_stop_closes_active_sse_stream_promptly(tmp_path: Path) -> None:
+    """Stopping an embedded UI server with an active SSE client exits immediately."""
+    live_bus = EventBus()
+    handle = await start_embedded_ui_server(
+        policy=_make_policy(tmp_path),
+        event_bus=live_bus,
+        pin_file=tmp_path / "pins.json",
+        host="127.0.0.1",
+        port=0,
+    )
+    assert handle is not None
+    async with (
+        httpx.AsyncClient(timeout=5.0) as client,
+        client.stream(
+            "GET",
+            f"http://127.0.0.1:{handle.port}/api/events",
+            headers={"Authorization": f"Bearer {handle.token}"},
+        ) as stream_resp,
+    ):
+        assert stream_resp.status_code == 200
+        await asyncio.sleep(0.05)
+        start = time.monotonic()
+        await handle.stop()
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0, f"handle.stop() stalled on active SSE stream: {elapsed:.2f}s"
+
+
+def test_packaged_demo_server_asset_exists_and_resolves() -> None:
+    """Bundled demo server exists inside mcp_guard.demo and resolves cleanly."""
+    resolved = _resolve_demo_server_path()
+    assert resolved is not None
+    assert resolved.is_file()
+    packaged = PROJECT_ROOT / "src" / "mcp_guard" / "demo" / "vulnerable_server.py"
+    assert packaged.is_file()
+    assert packaged.read_text(encoding="utf-8") == DEMO_SERVER.read_text(encoding="utf-8")

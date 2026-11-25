@@ -73,9 +73,12 @@ class EmbeddedUiHandle:
     port: int
     token: str
     url: str
+    shutdown_event: asyncio.Event | None = None
 
     async def stop(self) -> None:
         """Request graceful shutdown and wait for the UI server task."""
+        if self.shutdown_event is not None:
+            self.shutdown_event.set()
         self.server.should_exit = True
         try:
             await asyncio.wait_for(self.task, timeout=2.0)
@@ -159,6 +162,7 @@ def _resolve_demo_server_path() -> Path | None:
         Path(__file__).resolve().parents[3] / "demo" / "vulnerable_server.py",
         Path.cwd() / "demo" / "vulnerable_server.py",
         Path("/app/demo/vulnerable_server.py"),
+        Path(__file__).resolve().parents[1] / "demo" / "vulnerable_server.py",
     ]
     for candidate in candidates:
         if candidate.is_file():
@@ -289,6 +293,7 @@ class _UiState:
         server_id: str,
         logger: logging.Logger,
         keepalive_seconds: float,
+        shutdown_event: asyncio.Event | None = None,
     ) -> None:
         self.policy = policy
         self.event_bus = event_bus
@@ -298,6 +303,7 @@ class _UiState:
         self.server_id = server_id
         self.logger = logger
         self.keepalive_seconds = keepalive_seconds
+        self.shutdown_event = shutdown_event if shutdown_event is not None else asyncio.Event()
         self.latest_report: ScanReport | None = None
 
 
@@ -586,15 +592,33 @@ def create_ui_app(
             queue = state.event_bus.subscribe()
             try:
                 for event in state.event_bus.history():
+                    if state.shutdown_event.is_set():
+                        return
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                while True:
+                while not state.shutdown_event.is_set():
+                    get_task = asyncio.create_task(queue.get())
+                    stop_task = asyncio.create_task(state.shutdown_event.wait())
                     try:
-                        event = await asyncio.wait_for(
-                            queue.get(),
+                        done, pending = await asyncio.wait(
+                            {get_task, stop_task},
                             timeout=state.keepalive_seconds,
+                            return_when=asyncio.FIRST_COMPLETED,
                         )
+                        for task in pending:
+                            task.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                    except asyncio.CancelledError:
+                        get_task.cancel()
+                        stop_task.cancel()
+                        await asyncio.gather(get_task, stop_task, return_exceptions=True)
+                        raise
+                    if state.shutdown_event.is_set() or stop_task in done:
+                        break
+                    if get_task in done:
+                        event = get_task.result()
                         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                    except TimeoutError:
+                    else:
                         yield ": keepalive\n\n"
             finally:
                 state.event_bus.unsubscribe(queue)
@@ -926,6 +950,7 @@ def create_ui_app(
     app.state.allowed_origins = allowed_origins
     app.state.ui_state = state
     app.state.event_bus = eff_bus
+    app.state.shutdown_event = state.shutdown_event
     return app
 
 
@@ -984,6 +1009,25 @@ class _EmbeddedUvicornServer(uvicorn.Server):
 
     def install_signal_handlers(self) -> None:
         return None
+
+
+class _StandaloneUvicornServer(uvicorn.Server):
+    """Uvicorn server subclass that notifies active SSE streams on exit signals."""
+
+    def __init__(self, config: uvicorn.Config, shutdown_event: asyncio.Event) -> None:
+        super().__init__(config)
+        self._shutdown_event = shutdown_event
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        self._loop = asyncio.get_running_loop()
+        await super().startup(sockets=sockets)
+
+    def handle_exit(self, sig: int, frame: Any) -> None:
+        if self._loop is not None and not self._loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(self._shutdown_event.set)
+        super().handle_exit(sig, frame)
 
 
 async def start_embedded_ui_server(
@@ -1060,6 +1104,7 @@ async def start_embedded_ui_server(
         port=bound_port,
         token=eff_token,
         url=url,
+        shutdown_event=app.state.shutdown_event,
     )
 
 
@@ -1118,6 +1163,6 @@ def run_ui_server(
         access_log=False,
         log_level="warning",
     )
-    server = uvicorn.Server(config)
+    server = _StandaloneUvicornServer(config, app.state.shutdown_event)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(server.serve(sockets=[sock]))

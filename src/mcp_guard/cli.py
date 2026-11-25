@@ -636,14 +636,15 @@ def init(
 
 
 def _load_run_live_demo() -> Any:
-    """Locate and return `run_live_demo` from `demo.run_demo` or disk fallback paths."""
-    try:
-        mod = importlib.import_module("demo.run_demo")
-        fn = getattr(mod, "run_live_demo", None)
-        if callable(fn):
-            return fn
-    except ModuleNotFoundError:
-        pass
+    """Locate and return `run_live_demo` from packaged or repository demo modules."""
+    for module_name in ("demo.run_demo", "mcp_guard.demo.run_demo"):
+        try:
+            mod = importlib.import_module(module_name)
+            fn = getattr(mod, "run_live_demo", None)
+            if callable(fn):
+                return fn
+        except ModuleNotFoundError:
+            continue
 
     candidate_roots = [
         Path.cwd(),

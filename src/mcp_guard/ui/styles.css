@@ -1702,8 +1702,20 @@ pre {
     border-bottom: 1px solid var(--border-subtle);
   }
 
+  .tab-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-1);
+    padding-top: var(--space-1);
+    padding-bottom: var(--space-1);
+    overflow-x: visible;
+  }
+
   .tab-btn {
-    padding: var(--space-3);
+    justify-content: center;
+    text-align: center;
+    white-space: normal;
+    padding: var(--space-2) var(--space-3);
     font-size: 12px;
   }
 
