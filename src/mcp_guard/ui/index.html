@@ -288,7 +288,7 @@
         </div>
 
         <div id="scan-report-area" class="is-hidden">
-          <div class="summary-grid" id="scan-summary-cards"></div>
+          <div class="summary-strip" id="scan-summary-cards" role="region" aria-label="Scan summary metrics"></div>
 
           <div class="panel-box">
             <div class="section-header-row">
@@ -325,9 +325,12 @@
                   id="scan-filter-search"
                   type="search"
                   class="input"
-                  placeholder="Filter findings by rule, tool, or evidence…"
+                  placeholder="Filter findings by rule or tool…"
                   autocomplete="off"
                 />
+                <button type="button" id="btn-clear-scan-filters" class="btn btn-ghost btn-sm is-hidden">
+                  Reset Filters
+                </button>
               </div>
             </div>
 
@@ -460,11 +463,11 @@
             <div class="thresholds-grid">
               <div class="form-row">
                 <label for="policy-rate-rpm" class="field-label">Rate Limit (RPM)</label>
-                <input id="policy-rate-rpm" type="number" class="input mono-num" min="1" max="10000" value="60" />
+                <input id="policy-rate-rpm" type="number" class="input mono-num" min="0" max="10000" value="60" />
               </div>
               <div class="form-row">
                 <label for="policy-rate-burst" class="field-label">Burst Capacity</label>
-                <input id="policy-rate-burst" type="number" class="input mono-num" min="1" max="1000" value="15" />
+                <input id="policy-rate-burst" type="number" class="input mono-num" min="0" max="1000" value="15" />
               </div>
               <div class="form-row">
                 <label for="policy-entropy-threshold" class="field-label">DLP Entropy Floor</label>

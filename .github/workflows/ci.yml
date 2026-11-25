@@ -47,5 +47,5 @@ jobs:
 
       - name: Smoke test SARIF scan and validate JSON
         run: |
-          mcp-guard scan --format sarif --output report.sarif -- python demo/vulnerable_server.py || true
+          mcp-guard scan --format sarif --fail-on none --output report.sarif -- python demo/vulnerable_server.py
           python -c "import json, pathlib; data = json.loads(pathlib.Path('report.sarif').read_text(encoding='utf-8')); assert data.get('version') == '2.1.0'; assert len(data['runs'][0]['results']) > 0; print('SARIF smoke test passed:', len(data['runs'][0]['results']), 'results')"

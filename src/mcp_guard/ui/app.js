@@ -11,6 +11,7 @@
     searchQuery: "",
     paused: false,
     pausedBuffer: [],
+    hasClearedFeed: false,
     events: [],
     seenKeys: new Set(),
     counters: { total: 0, blocked: 0, redacted: 0, allowed: 0 },
@@ -19,6 +20,7 @@
     scanSeverityFilter: "all",
     scanSearchQuery: "",
     policy: null,
+    policyPayload: null,
     policyDirty: false,
     selectedMode: "enforce",
     allowExec: false,
@@ -113,8 +115,12 @@
             decoded += String.fromCharCode(ascii);
           } else if (ascii === 0x0a) {
             decoded += "\\n";
+          } else if (ascii === 0x0d) {
+            decoded += "\\r";
           } else if (ascii === 0x09) {
             decoded += "\\t";
+          } else {
+            decoded += "\\x" + ascii.toString(16).toUpperCase().padStart(2, "0");
           }
           i += 1;
         }
@@ -252,9 +258,10 @@
 
     if (nextTab === "pins") {
       loadPins();
-    } else if (nextTab === "policy") {
+    } else if (nextTab === "policy" && (!state.policyPayload || !state.policyDirty)) {
       loadPolicy();
     }
+    syncCounterActiveUI();
   }
 
   /* Header Status & Counters */
@@ -344,9 +351,19 @@
     ].join("|");
   }
 
+  function syncCounterActiveUI() {
+    document.querySelectorAll("[data-counter-filter]").forEach(function (cell) {
+      const match =
+        state.activeTab === "live-feed" &&
+        (cell.dataset.counterFilter || "all") === state.actionFilter;
+      cell.classList.toggle("is-active", match);
+    });
+  }
+
   function updatePauseButtonUI() {
     const btn = byId("btn-pause-feed");
     if (!btn) return;
+    btn.classList.toggle("btn-paused", state.paused);
     if (!state.paused) {
       btn.textContent = "Pause Stream";
       return;
@@ -356,11 +373,51 @@
       queued > 0 ? "Resume (" + queued + " queued)" : "Resume Stream";
   }
 
+  function parseEventTimestampMs(ev) {
+    if (!ev || !ev.timestamp) return null;
+    const ms = Date.parse(String(ev.timestamp));
+    return Number.isNaN(ms) ? null : ms;
+  }
+
+  function insertEventChronological(ev) {
+    const evMs = parseEventTimestampMs(ev);
+    if (evMs === null || state.events.length === 0) {
+      state.events.unshift(ev);
+    } else {
+      let idx = 0;
+      while (idx < state.events.length) {
+        const existingMs = parseEventTimestampMs(state.events[idx]);
+        if (existingMs === null || evMs >= existingMs) {
+          break;
+        }
+        idx += 1;
+      }
+      state.events.splice(idx, 0, ev);
+    }
+    if (state.events.length > MAX_FEED_ITEMS) {
+      state.events.length = MAX_FEED_ITEMS;
+    }
+  }
+
+  function pruneSeenKeys() {
+    if (state.seenKeys.size <= 1500) return;
+    const keep = new Set();
+    state.events.forEach(function (ev) {
+      keep.add(eventKey(ev));
+    });
+    state.pausedBuffer.forEach(function (ev) {
+      keep.add(eventKey(ev));
+    });
+    state.seenKeys = keep;
+  }
+
   function ingestEvent(ev, skipPauseCheck) {
     if (!ev || typeof ev !== "object") return false;
     const key = eventKey(ev);
     if (state.seenKeys.has(key)) return false;
     state.seenKeys.add(key);
+    pruneSeenKeys();
+    state.hasClearedFeed = false;
     countEvent(ev);
 
     if (!skipPauseCheck && state.paused) {
@@ -373,10 +430,7 @@
       return false;
     }
 
-    state.events.unshift(ev);
-    if (state.events.length > MAX_FEED_ITEMS) {
-      state.events.length = MAX_FEED_ITEMS;
-    }
+    insertEventChronological(ev);
     updateCountersUI();
     return true;
   }
@@ -427,9 +481,10 @@
 
   function setActionFilter(actionName) {
     state.actionFilter = actionName || "all";
-    document.querySelectorAll(".filter-chip").forEach(function (c) {
+    document.querySelectorAll(".filter-chip[data-action-filter]").forEach(function (c) {
       c.classList.toggle("active", c.dataset.actionFilter === state.actionFilter);
     });
+    syncCounterActiveUI();
     renderLiveFeed();
   }
 
@@ -438,10 +493,12 @@
     const action = String(ev.action || "allow").toLowerCase();
     const maxSev = ev.max_severity ? String(ev.max_severity).toLowerCase() : "";
     let tierClass = "";
-    if (maxSev === "critical") {
+    if (maxSev === "critical" || action === "block" || action === "strip_tool") {
       tierClass = " event-item-critical";
-    } else if (maxSev === "high") {
+    } else if (maxSev === "high" || action === "redact") {
       tierClass = " event-item-high";
+    } else if (action === "allow") {
+      tierClass = " event-item-allow";
     }
     card.className = "event-item" + tierClass;
 
@@ -461,13 +518,13 @@
     }
     if (ev.direction) {
       meta.appendChild(
-        makeBadge(formatModeLabel(ev.direction), "pill pill-neutral")
+        makeBadge(formatModeLabel(ev.direction), "direction-tag")
       );
     }
     if (ev.method) {
       const methodBadge = document.createElement("code");
       methodBadge.className = "rule-badge mono-code";
-      methodBadge.textContent = String(ev.method);
+      renderSafeText(methodBadge, String(ev.method));
       meta.appendChild(methodBadge);
     }
     if (ev.tool_name) {
@@ -602,10 +659,19 @@
         });
         actions.appendChild(demoBtn);
 
-        const cliHint = document.createElement("code");
-        cliHint.className = "empty-cli-hint mono-code";
-        cliHint.textContent = "mcp-guard wrap --ui-port 8766 -- <server-cmd>";
-        actions.appendChild(cliHint);
+        if (state.hasClearedFeed) {
+          const reloadBtn = document.createElement("button");
+          reloadBtn.type = "button";
+          reloadBtn.className = "btn btn-secondary";
+          reloadBtn.textContent = "Reload Buffered History";
+          reloadBtn.addEventListener("click", reloadBufferedHistory);
+          actions.appendChild(reloadBtn);
+        } else {
+          const cliHint = document.createElement("code");
+          cliHint.className = "empty-cli-hint mono-code";
+          cliHint.textContent = "mcp-guard wrap --ui-port 8766 -- <server-cmd>";
+          actions.appendChild(cliHint);
+        }
       } else {
         const clearBtn = document.createElement("button");
         clearBtn.type = "button";
@@ -643,7 +709,7 @@
 
   async function loadInitialHistory() {
     try {
-      const data = await apiFetch("/api/history?limit=200");
+      const data = await apiFetch("/api/history?limit=500");
       const items = Array.isArray(data)
         ? data
         : Array.isArray(data.events)
@@ -656,6 +722,18 @@
     } catch (err) {
       renderLiveFeed();
     }
+  }
+
+  async function reloadBufferedHistory() {
+    state.seenKeys.clear();
+    state.events = [];
+    state.pausedBuffer = [];
+    state.hasClearedFeed = false;
+    state.counters = { total: 0, blocked: 0, redacted: 0, allowed: 0 };
+    updateCountersUI();
+    updatePauseButtonUI();
+    await loadInitialHistory();
+    showToast("Reloaded buffered event history", false);
   }
 
   function connectSse() {
@@ -828,11 +906,29 @@
     return hay.indexOf(q) !== -1;
   }
 
+  function resetScanFilters() {
+    state.scanDetectorFilter = "all";
+    state.scanSeverityFilter = "all";
+    state.scanSearchQuery = "";
+    byId("scan-filter-severity").value = "all";
+    byId("scan-filter-search").value = "";
+    renderScanFindingsTable();
+  }
+
   function renderScanFindingsTable() {
     const report = state.latestReport;
     if (!report) return;
     const allFindings = Array.isArray(report.findings) ? report.findings : [];
     renderDetectorStrip(allFindings);
+
+    const hasScanFilters =
+      state.scanDetectorFilter !== "all" ||
+      state.scanSeverityFilter !== "all" ||
+      state.scanSearchQuery.trim() !== "";
+    const clearScanBtn = byId("btn-clear-scan-filters");
+    if (clearScanBtn) {
+      clearScanBtn.classList.toggle("is-hidden", !hasScanFilters);
+    }
 
     const tbody = byId("scan-findings-tbody");
     clearElement(tbody);
@@ -865,6 +961,7 @@
       const tr = document.createElement("tr");
 
       const tdSev = document.createElement("td");
+      tdSev.dataset.label = "Severity";
       const sev = String(f.severity || "info").toLowerCase();
       tdSev.appendChild(
         makeBadge(formatSeverityLabel(sev), "sev-badge sev-" + sev)
@@ -872,6 +969,7 @@
       tr.appendChild(tdSev);
 
       const tdRule = document.createElement("td");
+      tdRule.dataset.label = "Rule & Detector";
       const ruleCode = document.createElement("code");
       ruleCode.className = "rule-badge mono-code";
       ruleCode.textContent = String(f.rule_id || "");
@@ -885,11 +983,13 @@
       tr.appendChild(tdRule);
 
       const tdTarget = document.createElement("td");
+      tdTarget.dataset.label = "Target";
       tdTarget.className = "mono-code";
       renderSafeText(tdTarget, f.target || "-");
       tr.appendChild(tdTarget);
 
       const tdDetails = document.createElement("td");
+      tdDetails.dataset.label = "Finding & Unicode-Safe Evidence";
       const titleEl = document.createElement("div");
       titleEl.className = "finding-title";
       renderSafeText(titleEl, f.title || "");
@@ -916,6 +1016,7 @@
       tr.appendChild(tdDetails);
 
       const tdAction = document.createElement("td");
+      tdAction.dataset.label = "Action";
       const act = String(f.action_taken || "log").toLowerCase();
       tdAction.appendChild(
         makeBadge(formatActionLabel(act), "action-badge action-" + act)
@@ -984,7 +1085,6 @@
     try {
       const report = await apiFetch("/api/demo", { method: "POST", body: {} });
       renderScanReport(report);
-      showToast("6-Vector demo scan completed", false);
       loadPins();
     } catch (err) {
       showToast("Demo failed: " + err.message, true);
@@ -1011,7 +1111,6 @@
         body: { kind: "http", url: url, rug_pull_probes: probes },
       });
       renderScanReport(report);
-      showToast("HTTP scan completed", false);
       loadPins();
     } catch (err) {
       showToast("HTTP scan failed: " + err.message, true);
@@ -1043,7 +1142,6 @@
         body: { kind: "stdio", command: command, rug_pull_probes: probes },
       });
       renderScanReport(report);
-      showToast("STDIO scan completed", false);
       loadPins();
     } catch (err) {
       if (err.status === 403) {
@@ -1242,7 +1340,7 @@
           k.className = "meta-key";
           k.textContent = it.label + ":";
           const v = document.createElement("span");
-          v.className = it.isPath ? "mono-code muted" : "mono-num";
+          v.className = it.isPath ? "mono-code muted pins-summary-path" : "mono-num";
           v.textContent = it.val;
           stat.appendChild(k);
           stat.appendChild(v);
@@ -1367,8 +1465,14 @@
         const pendingRec = pending[toolName] || null;
 
         const row = document.createElement("div");
+        const isMutation = Boolean(pendingRec && pinnedRec);
         row.className =
-          "pin-row" + (pendingRec ? " pin-row-pending" : "");
+          "pin-row" +
+          (isMutation
+            ? " pin-row-mutation"
+            : pendingRec
+            ? " pin-row-pending"
+            : "");
 
         const rowHead = document.createElement("div");
         rowHead.className = "pin-row-head";
@@ -1444,6 +1548,7 @@
             : null;
 
         if (diffText) {
+          row.appendChild(renderDiffLines(diffText));
           const leftTool =
             (diffEntry && diffEntry.pinned_tool) ||
             (pinnedRec && pinnedRec.tool) ||
@@ -1453,13 +1558,18 @@
             (pendingRec && pendingRec.tool) ||
             null;
           if (leftTool && rightTool) {
+            const snapDetails = document.createElement("details");
+            snapDetails.className = "pin-snapshots-details";
+            const snapSummary = document.createElement("summary");
+            snapSummary.textContent = "Compare full JSON schemas";
             const sideBySide = document.createElement("div");
             sideBySide.className = "diff-side-by-side";
             sideBySide.appendChild(renderToolSnapshotBox("Pinned Schema", leftTool));
             sideBySide.appendChild(renderToolSnapshotBox("Pending Schema (Mutation)", rightTool));
-            row.appendChild(sideBySide);
+            snapDetails.appendChild(snapSummary);
+            snapDetails.appendChild(sideBySide);
+            row.appendChild(snapDetails);
           }
-          row.appendChild(renderDiffLines(diffText));
         } else {
           const record = pendingRec || pinnedRec;
           if (record && record.tool) {
@@ -1549,7 +1659,8 @@
     const policy =
       data && typeof data === "object" && data.policy ? data.policy : data;
     if (!policy || typeof policy !== "object") return;
-    state.policy = policy;
+    state.policyPayload = JSON.parse(JSON.stringify(data));
+    state.policy = JSON.parse(JSON.stringify(policy));
     state.selectedMode = String(policy.mode || "enforce").toLowerCase();
     setPolicyDirty(false);
 
@@ -1647,6 +1758,15 @@
       data && data.yaml ? String(data.yaml) : "";
   }
 
+  function discardPolicyEdits() {
+    if (state.policyPayload) {
+      renderPolicyForm(state.policyPayload);
+      showToast("Reverted unsaved policy changes", false);
+      return;
+    }
+    loadPolicy();
+  }
+
   async function loadPolicy() {
     try {
       const data = await apiFetch("/api/policy");
@@ -1657,23 +1777,41 @@
   }
 
   async function savePolicy() {
+    const rpmInput = byId("policy-rate-rpm");
+    const burstInput = byId("policy-rate-burst");
+    const entropyInput = byId("policy-entropy-threshold");
+
+    const rpmVal = Number(rpmInput.value);
+    const burstVal = Number(burstInput.value);
+    const entropyVal = Number(entropyInput.value);
+
+    if (!Number.isInteger(rpmVal) || rpmVal < 0 || rpmVal > 10000) {
+      showToast("Rate Limit (RPM) must be an integer between 0 and 10000", true);
+      rpmInput.focus();
+      return;
+    }
+    if (!Number.isInteger(burstVal) || burstVal < 0 || burstVal > 1000) {
+      showToast("Burst Capacity must be an integer between 0 and 1000", true);
+      burstInput.focus();
+      return;
+    }
+    if (!Number.isFinite(entropyVal) || entropyVal < 0 || entropyVal > 8) {
+      showToast("DLP Entropy Floor must be between 0.0 and 8.0", true);
+      entropyInput.focus();
+      return;
+    }
+
     const updated = Object.assign({}, state.policy || {});
     updated.mode = state.selectedMode;
     updated.pinning = Object.assign({}, updated.pinning || {}, {
       mode: byId("policy-pinning-mode").value,
     });
-
-    const rpmVal = parseInt(byId("policy-rate-rpm").value, 10);
-    const burstVal = parseInt(byId("policy-rate-burst").value, 10);
-    const entropyVal = parseFloat(byId("policy-entropy-threshold").value);
-
     updated.rate_limit = Object.assign({}, updated.rate_limit || {}, {
-      requests_per_minute: Number.isFinite(rpmVal) && rpmVal >= 1 ? rpmVal : 60,
-      burst: Number.isFinite(burstVal) && burstVal >= 1 ? burstVal : 15,
+      requests_per_minute: rpmVal,
+      burst: burstVal,
     });
     updated.response_guard = Object.assign({}, updated.response_guard || {}, {
-      entropy_threshold:
-        Number.isFinite(entropyVal) && entropyVal >= 0 ? entropyVal : 3.5,
+      entropy_threshold: entropyVal,
     });
 
     byId("policy-toggles")
@@ -1743,7 +1881,7 @@
       });
     });
 
-    document.querySelectorAll(".filter-chip").forEach(function (chip) {
+    document.querySelectorAll(".filter-chip[data-action-filter]").forEach(function (chip) {
       chip.addEventListener("click", function () {
         setActionFilter(chip.dataset.actionFilter || "all");
       });
@@ -1765,12 +1903,9 @@
       state.paused = !state.paused;
       if (!state.paused && state.pausedBuffer.length > 0) {
         state.pausedBuffer.forEach(function (queuedEv) {
-          state.events.unshift(queuedEv);
+          insertEventChronological(queuedEv);
         });
         state.pausedBuffer = [];
-        if (state.events.length > MAX_FEED_ITEMS) {
-          state.events.length = MAX_FEED_ITEMS;
-        }
         updateCountersUI();
         renderLiveFeed();
       }
@@ -1780,6 +1915,8 @@
     byId("btn-clear-feed").addEventListener("click", function () {
       state.events = [];
       state.pausedBuffer = [];
+      state.hasClearedFeed = true;
+      state.counters = { total: 0, blocked: 0, redacted: 0, allowed: 0 };
       updateCountersUI();
       updatePauseButtonUI();
       renderLiveFeed();
@@ -1797,6 +1934,10 @@
       state.scanSearchQuery = ev.target.value || "";
       renderScanFindingsTable();
     });
+    const clearScanBtn = byId("btn-clear-scan-filters");
+    if (clearScanBtn) {
+      clearScanBtn.addEventListener("click", resetScanFilters);
+    }
 
     document.querySelectorAll("[data-export-format]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -1841,7 +1982,7 @@
       setPolicyDirty(true);
     });
 
-    byId("btn-reset-policy").addEventListener("click", loadPolicy);
+    byId("btn-reset-policy").addEventListener("click", discardPolicyEdits);
     byId("btn-save-policy").addEventListener("click", savePolicy);
 
     byId("btn-copy-claude").addEventListener("click", function (ev) {

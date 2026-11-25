@@ -28,6 +28,7 @@ from mcp_guard.ui import (
     start_embedded_ui_server,
     validate_loopback_host,
 )
+from mcp_guard.ui.server import _split_stdio_command
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEMO_SERVER = PROJECT_ROOT / "demo" / "vulnerable_server.py"
@@ -190,6 +191,24 @@ def test_ui_static_assets_have_zero_xss_sinks_or_inline_scripts() -> None:
     assert re.search(r"\sstyle\s*=", index_html, re.IGNORECASE) is None
     assert "<style" not in index_html.lower()
     assert re.search(r"transition\s*:\s*all\b", styles_css, re.IGNORECASE) is None
+    assert "100vw" not in styles_css
+    assert "overflow-x: hidden" not in styles_css
+
+
+def test_split_stdio_command_preserves_windows_paths() -> None:
+    """Verify _split_stdio_command handles quoted/unquoted paths cleanly on current OS."""
+    if os.name == "nt":
+        assert _split_stdio_command(
+            r"C:\Users\dev\.venv\Scripts\python.exe demo\vulnerable_server.py"
+        ) == [r"C:\Users\dev\.venv\Scripts\python.exe", r"demo\vulnerable_server.py"]
+        assert _split_stdio_command(
+            r'"C:\Program Files\Python313\python.exe" "demo\vulnerable_server.py"'
+        ) == [r"C:\Program Files\Python313\python.exe", r"demo\vulnerable_server.py"]
+    else:
+        assert _split_stdio_command('/usr/bin/python3 "demo/vulnerable_server.py"') == [
+            "/usr/bin/python3",
+            "demo/vulnerable_server.py",
+        ]
 
 
 async def test_ui_demo_scan_sarif_export_and_allow_exec_gate(tmp_path: Path) -> None:
@@ -233,7 +252,16 @@ async def test_ui_demo_scan_sarif_export_and_allow_exec_gate(tmp_path: Path) -> 
         assert sarif_json["version"] == "2.1.0"
         assert len(sarif_json["runs"][0]["results"]) >= 4
 
-    # 2. allow_exec=True allows kind='stdio'.
+        for bad_payload in (
+            {"rug_pull_probes": 0},
+            {"rug_pull_probes": 99},
+            {"rug_pull_probes": True},
+            {"timeout": 999.0},
+        ):
+            bad_demo = await client.post("/api/demo", json=bad_payload)
+            assert bad_demo.status_code == 400
+
+    # 2. allow_exec=True allows kind='stdio' (both list and string command forms).
     policy_exec = _make_policy(tmp_path / "exec")
     app_exec = create_ui_app(policy=policy_exec, token=token, allow_exec=True)
     async with httpx.AsyncClient(
@@ -251,6 +279,17 @@ async def test_ui_demo_scan_sarif_export_and_allow_exec_gate(tmp_path: Path) -> 
         )
         assert stdio_res.status_code == 200, stdio_res.text
         assert stdio_res.json()["tools_scanned"] >= 5
+
+        stdio_str_res = await exec_client.post(
+            "/api/scan",
+            json={
+                "kind": "stdio",
+                "command": f'"{sys.executable}" "{DEMO_SERVER}"',
+                "rug_pull_probes": 1,
+            },
+        )
+        assert stdio_str_res.status_code == 200, stdio_str_res.text
+        assert stdio_str_res.json()["tools_scanned"] >= 5
 
 
 async def test_ui_pins_diff_approve_reset_and_policy_update(tmp_path: Path) -> None:
@@ -329,6 +368,7 @@ async def test_ui_pins_diff_approve_reset_and_policy_update(tmp_path: Path) -> N
                 "mode": "redact",
                 "rate_limit": {"requests_per_minute": 120, "burst": 25},
                 "response_guard": {"entropy_threshold": 4.0},
+                "llm_judge": {"enabled": True},
             },
         )
         assert policy_res.status_code == 200
@@ -342,6 +382,14 @@ async def test_ui_pins_diff_approve_reset_and_policy_update(tmp_path: Path) -> N
         assert "cursor" in body["snippets"]
         claude_args = body["snippets"]["claude_desktop"]["mcpServers"]["filesystem-guarded"]["args"]
         assert claude_args[2] == "redact"
+        assert "--llm-judge" in claude_args
+
+        for bad_policy in (
+            {"rate_limit": {"requests_per_minute": -1}},
+            {"response_guard": {"entropy_threshold": 9.5}},
+        ):
+            bad_res = await client.post("/api/policy", json=bad_policy)
+            assert bad_res.status_code == 400
 
 
 async def test_event_bus_bounds_drop_oldest_and_sse_streaming(tmp_path: Path) -> None:

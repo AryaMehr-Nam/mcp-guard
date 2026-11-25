@@ -9,6 +9,7 @@ import hmac
 import importlib.resources
 import json
 import logging
+import math
 import os
 import secrets
 import shlex
@@ -134,9 +135,9 @@ def _build_allowed_origins(
 
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">'
-    '<rect width="32" height="32" rx="8" fill="#132238"/>'
+    '<rect width="32" height="32" rx="8" fill="#0B1117"/>'
     '<path d="M16 4L26 8.2V15.4C26 21.4 21.7 26.2 16 28C10.3 26.2 6 21.4 6 15.4V8.2L16 4Z" '
-    'stroke="#38BDF8" stroke-width="2" fill="#0E2942"/>'
+    'stroke="#22D3EE" stroke-width="2" fill="#0F2633"/>'
     '<path d="M12.5 16L15 18.5L20 13.2" stroke="#34D399" stroke-width="2.2" '
     'stroke-linecap="round" stroke-linejoin="round"/>'
     "</svg>"
@@ -220,6 +221,8 @@ def _build_client_snippets(policy: PolicyConfig) -> dict[str, Any]:
     args: list[str] = ["wrap", "--mode", policy.mode.value]
     if policy.server_id:
         args.extend(["--server-id", policy.server_id])
+    if policy.llm_judge.enabled:
+        args.append("--llm-judge")
     args.extend(["--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "."])
     config_obj = {
         "mcpServers": {
@@ -233,6 +236,36 @@ def _build_client_snippets(policy: PolicyConfig) -> dict[str, Any]:
         "claude_desktop": config_obj,
         "cursor": config_obj,
     }
+
+
+def _split_stdio_command(raw_command: str) -> list[str]:
+    """Split a STDIO command string, preserving backslashes on Windows paths."""
+    is_windows = os.name == "nt"
+    parts = shlex.split(raw_command, posix=not is_windows)
+    if not is_windows:
+        return parts
+    cleaned: list[str] = []
+    for part in parts:
+        if len(part) >= 2 and part[0] == part[-1] and part[0] in ('"', "'"):
+            cleaned.append(part[1:-1])
+        else:
+            cleaned.append(part)
+    return [part for part in cleaned if part]
+
+
+def _parse_scan_options(body: dict[str, Any]) -> tuple[int, float] | None:
+    raw_probes = body.get("rug_pull_probes", 2)
+    raw_timeout = body.get("timeout", 15.0)
+    if isinstance(raw_probes, bool) or isinstance(raw_timeout, bool):
+        return None
+    try:
+        probes = int(raw_probes)
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return None
+    if probes < 1 or probes > 10 or not math.isfinite(timeout) or timeout < 0.5 or timeout > 120.0:
+        return None
+    return probes, timeout
 
 
 def _policy_response_payload(policy: PolicyConfig) -> dict[str, Any]:
@@ -688,7 +721,7 @@ def create_ui_app(
                 cmd = [str(part) for part in target if str(part)]
             elif isinstance(target, str):
                 try:
-                    cmd = shlex.split(target)
+                    cmd = _split_stdio_command(target)
                 except ValueError as exc:
                     return JSONResponse(
                         {"error": f"Invalid command string: {exc}"}, status_code=400
@@ -776,11 +809,10 @@ def create_ui_app(
             elif raw_cmd is not None:
                 target = str(raw_cmd)
 
-        try:
-            probes = max(1, int(body.get("rug_pull_probes", 2)))
-            timeout = max(0.5, float(body.get("timeout", 15.0)))
-        except (TypeError, ValueError):
+        parsed_opts = _parse_scan_options(body)
+        if parsed_opts is None:
             return JSONResponse({"error": "Invalid scan numeric parameter"}, status_code=400)
+        probes, timeout = parsed_opts
 
         return await _execute_scan(
             kind=kind,
@@ -793,11 +825,10 @@ def create_ui_app(
         body = await _read_optional_json(request)
         if body is None:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-        try:
-            probes = max(1, int(body.get("rug_pull_probes", 2)))
-            timeout = max(0.5, float(body.get("timeout", 15.0)))
-        except (TypeError, ValueError):
+        parsed_opts = _parse_scan_options(body)
+        if parsed_opts is None:
             return JSONResponse({"error": "Invalid demo parameter"}, status_code=400)
+        probes, timeout = parsed_opts
         return await _execute_scan(
             kind="demo",
             target=None,
@@ -847,6 +878,17 @@ def create_ui_app(
             updated = PolicyConfig.model_validate(merged)
         except ValidationError as exc:
             return JSONResponse({"error": f"Invalid policy configuration: {exc}"}, status_code=400)
+
+        if (
+            updated.rate_limit.requests_per_minute < 0
+            or updated.rate_limit.burst < 0
+            or not math.isfinite(updated.response_guard.entropy_threshold)
+            or not (0.0 <= updated.response_guard.entropy_threshold <= 8.0)
+        ):
+            return JSONResponse(
+                {"error": "Invalid policy configuration: numeric threshold out of range"},
+                status_code=400,
+            )
 
         state.policy = updated
         if state.pipeline is not None:
