@@ -1,0 +1,16 @@
+services:
+  mcp-guard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcp-guard:latest
+    stdin_open: true
+    tty: false
+    environment:
+      PYTHONUTF8: "1"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - mcp-guard-pins:/home/mcpguard/.mcp-guard
+
+volumes:
+  mcp-guard-pins:

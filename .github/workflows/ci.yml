@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Ruff lint
+        run: ruff check src tests demo
+
+      - name: Run Ruff format check
+        run: ruff format --check src tests demo
+
+      - name: Run mypy strict type check
+        run: mypy src
+
+      - name: Run pytest with coverage
+        run: pytest --cov=mcp_guard --cov-report=term-missing -v
+
+      - name: Smoke test live demo
+        run: mcp-guard demo
+
+      - name: Smoke test SARIF scan and validate JSON
+        run: |
+          mcp-guard scan --format sarif --output report.sarif -- python demo/vulnerable_server.py || true
+          python -c "import json, pathlib; data = json.loads(pathlib.Path('report.sarif').read_text(encoding='utf-8')); assert data.get('version') == '2.1.0'; assert len(data['runs'][0]['results']) > 0; print('SARIF smoke test passed:', len(data['runs'][0]['results']), 'results')"

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta
+    name="description"
+    content="Localhost security firewall control plane for inspecting MCP JSON-RPC telemetry, scanning servers, reviewing schema pins, and editing runtime policies."
+  />
+  <title>MCP-Guard: SecOps Control Plane</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-brand">
+        <svg class="brand-emblem" width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
+          <rect class="emblem-frame" x="1.5" y="1.5" width="33" height="33" rx="8" />
+          <path
+            class="emblem-shield"
+            d="M18 6.5L27.5 10.4V17.4C27.5 23.1 23.4 27.6 18 29.5C12.6 27.6 8.5 23.1 8.5 17.4V10.4L18 6.5Z"
+          />
+          <path class="emblem-check" d="M13.8 18.1L16.7 21L22.5 14.9" />
+        </svg>
+        <div class="brand-text">
+          <h1>MCP-Guard</h1>
+          <p class="brand-subtitle">Model Context Protocol Security Firewall</p>
+        </div>
+      </div>
+
+      <div class="topbar-telemetry">
+        <div class="status-group">
+          <span id="status-mode-badge" class="pill pill-neutral">Standalone</span>
+          <button
+            type="button"
+            id="header-guard-mode"
+            class="pill pill-mode-enforce mode-jump-btn"
+            title="Open Policy tab to change enforcement mode"
+          >
+            Enforce
+          </button>
+          <span class="meta-chip">
+            <span class="meta-key">Server</span>
+            <code id="header-server-id" class="mono-code">default</code>
+          </span>
+          <span id="sse-indicator" class="sse-pill sse-connecting" role="status" aria-live="polite">
+            <span class="sse-dot" aria-hidden="true"></span>
+            <span id="sse-status-text">Connecting</span>
+          </span>
+        </div>
+
+        <div class="counter-strip" role="group" aria-label="Filter live telemetry by outcome">
+          <button type="button" class="counter-cell" data-counter-filter="all">
+            <span class="counter-label">Total</span>
+            <span id="counter-total" class="counter-value mono-num">0</span>
+          </button>
+          <button type="button" class="counter-cell counter-cell-danger" data-counter-filter="blocked">
+            <span class="counter-label">Blocked</span>
+            <span id="counter-blocked" class="counter-value mono-num">0</span>
+          </button>
+          <button type="button" class="counter-cell counter-cell-warn" data-counter-filter="redact">
+            <span class="counter-label">Redacted</span>
+            <span id="counter-redacted" class="counter-value mono-num">0</span>
+          </button>
+          <button type="button" class="counter-cell counter-cell-ok" data-counter-filter="allow">
+            <span class="counter-label">Allowed</span>
+            <span id="counter-allowed" class="counter-value mono-num">0</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <nav class="tab-bar" role="tablist" aria-label="Control plane sections">
+      <button
+        type="button"
+        id="tab-live-feed"
+        class="tab-btn active"
+        data-tab="live-feed"
+        role="tab"
+        aria-selected="true"
+        aria-controls="panel-live-feed"
+      >
+        Live Feed
+        <span id="feed-count-badge" class="tab-count tab-count-neutral is-hidden">0</span>
+      </button>
+      <button
+        type="button"
+        id="tab-scanner"
+        class="tab-btn"
+        data-tab="scanner"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-scanner"
+        tabindex="-1"
+      >
+        Scanner &amp; Demo
+        <span id="scan-findings-badge" class="tab-count is-hidden">0</span>
+      </button>
+      <button
+        type="button"
+        id="tab-pins"
+        class="tab-btn"
+        data-tab="pins"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-pins"
+        tabindex="-1"
+      >
+        Schema Pins
+        <span id="pending-pins-badge" class="tab-count is-hidden">0</span>
+      </button>
+      <button
+        type="button"
+        id="tab-policy"
+        class="tab-btn"
+        data-tab="policy"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-policy"
+        tabindex="-1"
+      >
+        Policy &amp; Config
+        <span id="policy-dirty-badge" class="tab-count is-hidden">Unsaved</span>
+      </button>
+    </nav>
+
+    <noscript>
+      <div class="noscript-banner" role="alert">
+        JavaScript is disabled. Enable JavaScript on localhost to stream live SSE events, launch scans, approve schema pins, and update runtime policies.
+      </div>
+    </noscript>
+
+    <div id="global-toast" class="toast is-hidden" role="status" aria-live="polite"></div>
+
+    <main class="main-content">
+      <!-- TAB 1: LIVE FEED -->
+      <section
+        id="panel-live-feed"
+        class="tab-panel active"
+        role="tabpanel"
+        aria-labelledby="tab-live-feed"
+      >
+        <div class="panel-header">
+          <div class="panel-heading-group">
+            <h2>Live Security Telemetry</h2>
+            <p class="panel-desc">Real-time JSON-RPC request and response inspection stream over Server-Sent Events.</p>
+          </div>
+          <div class="toolbar-actions">
+            <button type="button" id="btn-pause-feed" class="btn btn-secondary">Pause Stream</button>
+            <button type="button" id="btn-clear-feed" class="btn btn-ghost">Clear View</button>
+          </div>
+        </div>
+
+        <div class="panel-box filter-bar">
+          <div class="filter-controls-left">
+            <div class="action-filter-group" role="group" aria-label="Filter telemetry by action">
+              <button type="button" class="filter-chip active" data-action-filter="all">All</button>
+              <button type="button" class="filter-chip" data-action-filter="blocked">Blocked &amp; Stripped</button>
+              <button type="button" class="filter-chip" data-action-filter="block">Block</button>
+              <button type="button" class="filter-chip" data-action-filter="strip_tool">Strip Tool</button>
+              <button type="button" class="filter-chip" data-action-filter="redact">Redact</button>
+              <button type="button" class="filter-chip" data-action-filter="allow">Allow</button>
+            </div>
+            <div class="filter-select-wrap">
+              <label for="feed-severity-filter" class="sr-only">Filter by severity</label>
+              <select id="feed-severity-filter" class="input select-compact">
+                <option value="all">All severities</option>
+                <option value="critical">Critical only</option>
+                <option value="high">High only</option>
+                <option value="medium">Medium only</option>
+                <option value="low">Low only</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="filter-controls-right">
+            <div class="search-wrap">
+              <label for="feed-search" class="sr-only">Search events</label>
+              <input
+                id="feed-search"
+                type="search"
+                class="input"
+                placeholder="Filter by tool, method, rule ID, or summary…"
+                autocomplete="off"
+              />
+            </div>
+            <button type="button" id="btn-clear-feed-filters" class="btn btn-ghost btn-sm is-hidden">
+              Reset Filters
+            </button>
+            <span id="feed-stats-line" class="feed-stats mono-num">0 events</span>
+          </div>
+        </div>
+
+        <div id="live-feed-list" class="event-list"></div>
+      </section>
+
+      <!-- TAB 2: SCANNER & DEMO -->
+      <section
+        id="panel-scanner"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-scanner"
+        hidden
+      >
+        <div class="panel-header">
+          <div class="panel-heading-group">
+            <h2>Active Security Scanner</h2>
+            <p class="panel-desc">Probe MCP servers for tool poisoning, hidden Unicode tags, schema rug pulls, and cross-tool shadowing.</p>
+          </div>
+          <div class="toolbar-actions">
+            <button type="button" id="btn-run-demo" class="btn btn-primary">
+              Run 6-Vector Demo
+            </button>
+          </div>
+        </div>
+
+        <div class="panel-box demo-workbench">
+          <div class="demo-workbench-copy">
+            <h3>Built-In 6-Vector Threat Verification</h3>
+            <p class="panel-desc">
+              Launches the local vulnerable test server over STDIO and exercises XML smuggling, U+E00xx tag steganography, mid-session rug-pull mutation, tool shadowing, indirect prompt injection, and synthetic secret leakage.
+            </p>
+          </div>
+          <div class="demo-vectors-list" aria-label="Covered attack vectors">
+            <span class="rule-badge">MCP-POI-* Poisoning</span>
+            <span class="rule-badge">MCP-UNI-001 Unicode Tags</span>
+            <span class="rule-badge">MCP-RUG-001 Rug Pull</span>
+            <span class="rule-badge">MCP-SHD-001 Shadowing</span>
+            <span class="rule-badge">MCP-IPI-001 Prompt Injection</span>
+            <span class="rule-badge">MCP-DLP-* Secret Leaks</span>
+          </div>
+        </div>
+
+        <div class="grid-two">
+          <form id="scan-http-form" class="panel-box form-panel">
+            <div class="section-header-row">
+              <h3>HTTP / Streamable SSE Scan</h3>
+              <span class="pill pill-neutral">Remote or Local URL</span>
+            </div>
+            <div class="form-row">
+              <label for="scan-http-url" class="field-label">Target MCP Endpoint URL</label>
+              <input
+                id="scan-http-url"
+                type="url"
+                class="input mono-code"
+                placeholder="http://127.0.0.1:8080/mcp"
+                required
+              />
+            </div>
+            <div class="form-row-inline">
+              <div class="form-row">
+                <label for="scan-http-probes" class="field-label">Rug-Pull Probes</label>
+                <input id="scan-http-probes" type="number" class="input mono-num" min="1" max="5" value="2" />
+              </div>
+              <div class="form-action-end">
+                <button type="submit" id="btn-scan-http" class="btn btn-secondary">Scan HTTP URL</button>
+              </div>
+            </div>
+          </form>
+
+          <form id="scan-stdio-form" class="panel-box form-panel">
+            <div class="section-header-row">
+              <h3>STDIO Subprocess Scan</h3>
+              <span id="exec-capability-pill" class="pill pill-neutral">Requires --allow-exec</span>
+            </div>
+            <div class="form-row">
+              <label for="scan-stdio-cmd" class="field-label">Server Command</label>
+              <input
+                id="scan-stdio-cmd"
+                type="text"
+                class="input mono-code"
+                placeholder="npx -y @modelcontextprotocol/server-filesystem /tmp"
+              />
+            </div>
+            <div class="form-row-inline">
+              <div class="form-row">
+                <label for="scan-stdio-probes" class="field-label">Rug-Pull Probes</label>
+                <input id="scan-stdio-probes" type="number" class="input mono-num" min="1" max="5" value="2" />
+              </div>
+              <div class="form-action-end">
+                <button type="submit" id="btn-scan-stdio" class="btn btn-secondary">Scan STDIO</button>
+              </div>
+            </div>
+            <div id="stdio-scan-notice" class="alert alert-warn is-hidden" role="alert"></div>
+          </form>
+        </div>
+
+        <div id="scan-report-area" class="is-hidden">
+          <div class="summary-grid" id="scan-summary-cards"></div>
+
+          <div class="panel-box">
+            <div class="section-header-row">
+              <div class="scan-head-meta">
+                <h3>Scan Findings</h3>
+                <p id="scan-target-meta" class="scan-target-meta muted mono-code"></p>
+              </div>
+              <div class="export-group">
+                <button type="button" class="btn btn-secondary btn-sm" data-export-format="sarif">
+                  Download SARIF 2.1.0
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" data-export-format="markdown">
+                  Download Markdown
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" data-export-format="json">
+                  Download JSON
+                </button>
+              </div>
+            </div>
+
+            <div class="findings-toolbar">
+              <div id="scan-detector-strip" class="detector-strip" role="group" aria-label="Filter findings by detector"></div>
+              <div class="findings-filter-inputs">
+                <label for="scan-filter-severity" class="sr-only">Filter scan findings by severity</label>
+                <select id="scan-filter-severity" class="input select-compact">
+                  <option value="all">All severities</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+                <label for="scan-filter-search" class="sr-only">Search scan findings</label>
+                <input
+                  id="scan-filter-search"
+                  type="search"
+                  class="input"
+                  placeholder="Filter findings by rule, tool, or evidence…"
+                  autocomplete="off"
+                />
+              </div>
+            </div>
+
+            <div id="scan-errors-box" class="alert alert-danger is-hidden" role="alert"></div>
+
+            <div class="table-wrap">
+              <table class="findings-table">
+                <thead>
+                  <tr>
+                    <th>Severity</th>
+                    <th>Rule &amp; Detector</th>
+                    <th>Target</th>
+                    <th>Finding &amp; Unicode-Safe Evidence</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="scan-findings-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div id="scan-empty-state" class="panel-box empty-state">
+          <p class="empty-title">No scan report loaded yet</p>
+          <p class="panel-desc">Run the 6-vector built-in demo above or probe an HTTP/STDIO MCP endpoint to inspect findings and export SARIF 2.1.0.</p>
+        </div>
+      </section>
+
+      <!-- TAB 3: SCHEMA PINS & DIFFS -->
+      <section
+        id="panel-pins"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-pins"
+        hidden
+      >
+        <div class="panel-header">
+          <div class="panel-heading-group">
+            <h2>Cryptographic Schema Pins &amp; Rug-Pull Diffs</h2>
+            <p class="panel-desc">Inspect SHA-256 tool fingerprints, review schema mutation diffs, approve pending tools, or reset stored trust.</p>
+          </div>
+          <div class="toolbar-actions">
+            <button type="button" id="btn-refresh-pins" class="btn btn-ghost">Refresh</button>
+            <button type="button" id="btn-approve-all-pins" class="btn btn-primary">Approve All</button>
+            <button type="button" id="btn-reset-all-pins" class="btn btn-danger">Reset All</button>
+          </div>
+        </div>
+
+        <div id="pins-summary-bar" class="panel-box pins-summary-bar is-hidden"></div>
+        <div id="pins-container" class="stack"></div>
+      </section>
+
+      <!-- TAB 4: POLICY & CLIENT CONFIG -->
+      <section
+        id="panel-policy"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-policy"
+        hidden
+      >
+        <div class="panel-header">
+          <div class="panel-heading-group">
+            <h2>Runtime Policy &amp; Client Config</h2>
+            <p class="panel-desc">Switch enforcement modes live, tune guard thresholds, and copy ready-to-use MCP client configurations.</p>
+          </div>
+          <div class="toolbar-actions">
+            <span id="policy-dirty-pill" class="pill pill-mode-redact is-hidden">Unsaved changes</span>
+            <button type="button" id="btn-reset-policy" class="btn btn-ghost is-hidden">Discard</button>
+            <button type="button" id="btn-save-policy" class="btn btn-primary">Save Policy</button>
+          </div>
+        </div>
+
+        <div class="grid-two">
+          <div class="panel-box">
+            <div class="section-header-row">
+              <h3>Enforcement Mode &amp; Pinning</h3>
+            </div>
+
+            <div class="form-row">
+              <span class="field-label">Enforcement Mode</span>
+              <div class="mode-selector" role="radiogroup" aria-label="Enforcement Mode">
+                <div class="mode-choice">
+                  <button
+                    type="button"
+                    class="mode-option"
+                    data-policy-mode="enforce"
+                    role="radio"
+                    aria-checked="true"
+                  >
+                    Enforce
+                  </button>
+                  <p class="mode-sub">Block attacks and strip poisoned tools</p>
+                </div>
+                <div class="mode-choice">
+                  <button
+                    type="button"
+                    class="mode-option"
+                    data-policy-mode="redact"
+                    role="radio"
+                    aria-checked="false"
+                  >
+                    Redact
+                  </button>
+                  <p class="mode-sub">Mask leaked secrets and sanitize replies</p>
+                </div>
+                <div class="mode-choice">
+                  <button
+                    type="button"
+                    class="mode-option"
+                    data-policy-mode="audit"
+                    role="radio"
+                    aria-checked="false"
+                  >
+                    Audit
+                  </button>
+                  <p class="mode-sub">Record security findings without blocking</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <label for="policy-pinning-mode" class="field-label">Schema Pinning Mode</label>
+              <select id="policy-pinning-mode" class="input">
+                <option value="tofu">TOFU (Trust On First Use)</option>
+                <option value="strict">Strict (Require Manual Approval)</option>
+                <option value="disabled">Disabled</option>
+              </select>
+            </div>
+
+            <div class="thresholds-grid">
+              <div class="form-row">
+                <label for="policy-rate-rpm" class="field-label">Rate Limit (RPM)</label>
+                <input id="policy-rate-rpm" type="number" class="input mono-num" min="1" max="10000" value="60" />
+              </div>
+              <div class="form-row">
+                <label for="policy-rate-burst" class="field-label">Burst Capacity</label>
+                <input id="policy-rate-burst" type="number" class="input mono-num" min="1" max="1000" value="15" />
+              </div>
+              <div class="form-row">
+                <label for="policy-entropy-threshold" class="field-label">DLP Entropy Floor</label>
+                <input
+                  id="policy-entropy-threshold"
+                  type="number"
+                  class="input mono-num"
+                  min="0"
+                  max="8"
+                  step="0.1"
+                  value="3.5"
+                />
+              </div>
+            </div>
+
+            <div class="section-header-row section-divider">
+              <h3>Detector Controls</h3>
+            </div>
+            <div id="policy-toggles" class="toggle-grid"></div>
+          </div>
+
+          <div class="stack">
+            <div class="panel-box">
+              <div class="section-header-row">
+                <h3>Claude Desktop (<code class="mono-code">claude_desktop_config.json</code>)</h3>
+                <button type="button" id="btn-copy-claude" class="btn btn-secondary btn-sm">Copy JSON</button>
+              </div>
+              <pre id="snippet-claude" class="code-block mono-code"></pre>
+            </div>
+
+            <div class="panel-box">
+              <div class="section-header-row">
+                <h3>Cursor (<code class="mono-code">.cursor/mcp.json</code>)</h3>
+                <button type="button" id="btn-copy-cursor" class="btn btn-secondary btn-sm">Copy JSON</button>
+              </div>
+              <pre id="snippet-cursor" class="code-block mono-code"></pre>
+            </div>
+
+            <div class="panel-box">
+              <div class="section-header-row">
+                <h3>Active Policy YAML</h3>
+                <button type="button" id="btn-copy-yaml" class="btn btn-secondary btn-sm">Copy YAML</button>
+              </div>
+              <pre id="snippet-yaml" class="code-block mono-code"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

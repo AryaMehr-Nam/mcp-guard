@@ -1,0 +1,34 @@
+# Version control & CI
+.git/
+.github/
+
+# Virtual environments & caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging & build artifacts
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Coverage, reports & local tests
+.coverage
+.coverage.*
+htmlcov/
+*.sarif
+tests/
+
+# Local & Docker files
+.env
+.env.*
+.DS_Store
+Thumbs.db
+Dockerfile
+docker-compose.yml

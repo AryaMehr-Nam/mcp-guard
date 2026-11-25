@@ -1,0 +1,81 @@
+# MCP-Guard Default Security Policy
+# Generated/used as the baseline policy when no explicit policy file is provided.
+# Operating modes: enforce | audit | redact
+mode: enforce
+
+# Optional stable identifier for the protected server (auto-derived if null).
+server_id: null
+
+# Optional path to a structured security log file (logs always go to stderr).
+log_file: null
+
+# Static & runtime inspection for prompt injection / hidden instructions in tool metadata.
+poisoning:
+  enabled: true
+  inspect_encoded: true
+  max_decode_bytes: 16384
+
+# Detection for invisible, bidirectional, tag, and homoglyph Unicode attacks.
+unicode:
+  enabled: true
+  detect_tags: true
+  detect_zero_width: true
+  detect_bidi: true
+  detect_homoglyphs: true
+
+# Cryptographic schema pinning to detect tool rug-pulls across sessions.
+# Modes: tofu | strict | disabled
+pinning:
+  enabled: true
+  mode: tofu
+  pin_file: "~/.mcp-guard/pins.json"
+
+# Detection for tool shadowing and unauthorized high-privilege tool overrides.
+shadowing:
+  enabled: true
+  high_privilege_tools:
+    - execute_command
+    - run_command
+    - shell
+    - bash
+    - exec
+    - eval
+    - write_file
+    - edit_file
+    - delete_file
+    - remove_file
+    - http_request
+    - fetch
+    - send_email
+
+# Runtime enforcement on tool call arguments, paths, URLs, and tool allow/deny lists.
+runtime_guard:
+  enabled: true
+  allowed_paths: []
+  blocked_paths: []
+  allow_private_urls: false
+  allowed_shell_tools: []
+  allowed_tools: []
+  denied_tools: []
+
+# Inspection and secret redaction on upstream MCP server responses.
+response_guard:
+  enabled: true
+  detect_indirect_injection: true
+  detect_secrets: true
+  entropy_threshold: 3.5
+
+# Token-bucket rate limiting for runtime tool calls.
+rate_limit:
+  enabled: true
+  requests_per_minute: 60
+  burst: 15
+  per_tool: true
+
+# Optional semantic LLM-as-a-judge inspection (disabled by default).
+llm_judge:
+  enabled: false
+  endpoint: "http://localhost:11434/api/generate"
+  model: "qwen2.5:7b"
+  timeout_seconds: 5.0
+  cache_size: 512
