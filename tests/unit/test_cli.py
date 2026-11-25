@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,12 @@ from mcp_guard.policy.loader import load_policy
 runner = CliRunner()
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEMO_SERVER = REPO_ROOT / "demo" / "vulnerable_server.py"
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI/VT escape sequences from CLI output."""
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def _make_report(severities: list[Severity], target: str = "python srv.py") -> ScanReport:
@@ -322,10 +329,12 @@ def test_pins_list_approve_and_reset(tmp_path: Path) -> None:
     list_res = runner.invoke(
         app,
         ["pins", "list", "--pin-file", str(pin_file), "--server-id", "srv-alpha"],
+        env={"COLUMNS": "120"},
     )
     assert list_res.exit_code == 0
-    assert "tool_a" in list_res.output
-    assert "pending" in list_res.output
+    clean_list_output = _strip_ansi(list_res.output)
+    assert "tool_a" in clean_list_output
+    assert "pending" in clean_list_output
 
     approve_one = runner.invoke(
         app,
@@ -402,19 +411,21 @@ def test_scan_against_vulnerable_demo_server(tmp_path: Path) -> None:
 
 def test_demo_command_smoke() -> None:
     """`mcp-guard demo` runs the full live demonstration and exits 0."""
-    result = runner.invoke(app, ["demo"])
+    result = runner.invoke(app, ["demo"], env={"COLUMNS": "120"})
     assert result.exit_code == 0, result.output
-    assert "MCP-Guard live demo completed successfully." in result.output
+    assert "MCP-Guard live demo completed successfully." in _strip_ansi(result.output)
 
 
-def test_ui_help() -> None:
+def test_ui_help(monkeypatch: pytest.MonkeyPatch) -> None:
     """`mcp-guard ui --help` displays Web UI options."""
-    result = runner.invoke(app, ["ui", "--help"])
+    monkeypatch.setattr("typer.rich_utils.MAX_WIDTH", 120, raising=False)
+    result = runner.invoke(app, ["ui", "--help"], env={"COLUMNS": "120"})
     assert result.exit_code == 0
-    assert "--host" in result.output
-    assert "--port" in result.output
-    assert "--allow-exec" in result.output
-    assert "--no-open" in result.output
+    clean_output = _strip_ansi(result.output)
+    assert "--host" in clean_output
+    assert "--port" in clean_output
+    assert "--allow-exec" in clean_output
+    assert "--no-open" in clean_output
 
 
 def test_ui_rejects_non_loopback_host(monkeypatch: pytest.MonkeyPatch) -> None:
